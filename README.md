@@ -94,4 +94,4 @@ The application follows a Retrieval Augmented Generation (RAG) pattern:
 Once the setup is complete, run the Streamlit application from your terminal:
 
 ```bash
-streamlit run your_script_name.py
+streamlit run rag-reviewer-streamlit.py

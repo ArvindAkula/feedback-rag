@@ -1,0 +1,3 @@
+==> 2025-05-29 18:28:19 <==
+# cmd: /opt/anaconda3/bin/conda create -p ./env -y
+# conda version: 24.9.2

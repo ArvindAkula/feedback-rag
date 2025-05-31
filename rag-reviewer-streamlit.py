@@ -8,6 +8,9 @@ from sentence_transformers import SentenceTransformer
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
+# Call set_page_config as the very first Streamlit command
+st.set_page_config(page_title="Review Insights Q&A", layout="wide")
+
 # --- Configuration ---
 MODEL_NAME = "all-MiniLM-L6-v2"  # SentenceTransformer model
 CSV_FILE_PATH = "data/reviews.csv"       # Path to your reviews CSV
@@ -18,14 +21,17 @@ OPENAI_MODEL = "gpt-4" # OpenAI model for answer generation (e.g., "gpt-4", "gpt
 # --- Caching Functions ---
 
 @st.cache_resource
-def get_openai_client():
-    """Loads the OpenAI API key from .env and returns an OpenAI client instance."""
-    load_dotenv()
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if not openai_key:
-        st.error("OPENAI_API_KEY not found. Please set it in your .env file or as an environment variable.")
+def get_openai_client(api_key_to_use: str):
+    """Loads the OpenAI API key and returns an OpenAI client instance."""
+    if not api_key_to_use:
+        st.error("API key not provided to OpenAI client initializer.")
         return None
-    return OpenAI(api_key=openai_key)
+    # load_dotenv() # Still useful if other parts of app might use .env vars independently
+    # openai_key = os.getenv("OPENAI_API_KEY") # We are now passing the key directly
+    # if not openai_key:
+    #     st.error("OPENAI_API_KEY not found. Please set it in your .env file or as an environment variable.")
+    #     return None
+    return OpenAI(api_key=api_key_to_use)
 
 @st.cache_resource
 def load_sentence_transformer_model(model_name: str):
@@ -47,6 +53,9 @@ def load_and_preprocess_chunks(file_path: str) -> list:
         st.error(f"Error loading CSV file: {e}")
         return []
 
+    if "review_text" not in df.columns:
+        st.error("Error: 'review_text' column not found in the CSV file.")
+        return []
 
     df = df.dropna(subset=["review_text"])
     if df.empty:
@@ -58,7 +67,7 @@ def load_and_preprocess_chunks(file_path: str) -> list:
         chunk_size=1000,  # Max characters per chunk
         chunk_overlap=50   # Overlap between chunks to maintain context
     )
-    
+
     all_text_chunks = []
     for text in df["review_text"]:
         if pd.notna(text) and isinstance(text, str) and text.strip():
@@ -76,9 +85,9 @@ def get_embeddings(_chunks: list, _model_name_for_cache_key: str) -> np.ndarray:
     """Generates and caches embeddings for the given text chunks using the specified model."""
     if not _chunks:
         return np.array([])
-    
+
     s_model = load_sentence_transformer_model(_model_name_for_cache_key) # Fetches cached SentenceTransformer model
-    
+
     with st.spinner(f"Generating embeddings for {len(_chunks)} chunks... This can take some time on the first run."):
         try:
             embeddings_array = s_model.encode(_chunks, show_progress_bar=False) # Set to True for console progress if needed
@@ -97,8 +106,6 @@ def retrieve_relevant_chunks_streamlit(query: str, all_doc_chunks: list, doc_emb
     try:
         query_embedding = s_model.encode([query])
         scores = cosine_similarity(query_embedding, doc_embeddings)[0]
-        # Get the indices of the top k scores in descending order
-        # Ensure k is not larger than the number of available chunks
         top_k_actual = min(k, len(all_doc_chunks))
         top_k_idx = np.argsort(scores)[-top_k_actual:][::-1]
         return [all_doc_chunks[i] for i in top_k_idx]
@@ -107,13 +114,13 @@ def retrieve_relevant_chunks_streamlit(query: str, all_doc_chunks: list, doc_emb
         return []
 
 
-def generate_answer_from_chunks_streamlit(query: str, relevant_doc_chunks: list, openai_client: OpenAI) -> str:
+def generate_answer_from_chunks_streamlit(query: str, relevant_doc_chunks: list, openai_client_instance: OpenAI) -> str:
     """Generates an answer to the query based on provided chunks using OpenAI."""
     if not relevant_doc_chunks:
         return "No relevant information was found in the reviews to answer this query."
 
     context = "\n\n---\n\n".join(relevant_doc_chunks)
-    
+
     prompt_message = f"""Please answer the following question based *only* on the provided text excerpts from customer reviews.
 If the answer cannot be found in the excerpts, please state that. Be concise and direct.
 
@@ -125,7 +132,7 @@ Excerpts:
 Answer:"""
 
     try:
-        response = openai_client.chat.completions.create(
+        response = openai_client_instance.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": "You are a helpful assistant that answers questions based on provided text excerpts from customer reviews."},
@@ -138,33 +145,56 @@ Answer:"""
         st.error(f"An error occurred while communicating with OpenAI: {e}")
         return "Sorry, I encountered an error while trying to generate an answer from OpenAI."
 
+# --- API Key Handling & OpenAI Client Initialization ---
+# Attempt to get API key from environment variables first
+openai_api_key_global = os.getenv("OPENAI_API_KEY")
+
+# If not found in environment, prompt user in sidebar
+if not openai_api_key_global:
+    st.sidebar.markdown("### 🔑 Paste your OpenAI API Key")
+    openai_api_key_global = st.sidebar.text_input(
+        label="OpenAI API Key (sk-...)", # Clearer label
+        type="password",
+        placeholder="sk-XXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+        help="You can find your API key on the OpenAI dashboard."
+    )
+
+# If no API key is provided after prompting, stop the app
+if not openai_api_key_global:
+    st.error("⚠️ Please provide an OpenAI API key (in the sidebar) to continue.")
+    st.info("You can obtain an API key from the OpenAI website.")
+    st.stop()
+
+# Initialize OpenAI client globally using the obtained API key
+openai_client_global = get_openai_client(openai_api_key_global)
+
+# If client initialization fails (e.g., invalid key format, though OpenAI client might not check this on init), stop.
+if not openai_client_global:
+    st.error("OpenAI client could not be initialized. Please check your API key and ensure it is correct.")
+    st.stop()
+
 # --- Streamlit App UI ---
-st.set_page_config(page_title="Review Q&A", layout="wide")
-st.title("📄 Review Insights Q&A")
+st.title("📄 Review Insights Q&A") # Using the title with emoji as it was later in the script
 st.markdown("Ask questions about customer reviews and get answers powered by AI.")
 
-# --- Initialization ---
-openai_client_global = get_openai_client()
+
+# --- Initialization of data and models ---
 s_model_global = load_sentence_transformer_model(MODEL_NAME)
 all_chunks_global = load_and_preprocess_chunks(CSV_FILE_PATH)
 
-if not openai_client_global:
-    st.error("OpenAI client could not be initialized. Please check your API key setup.")
-    st.stop()
-
 if not all_chunks_global:
-    st.warning("No review chunks available to process. Please check the CSV file and its content.")
-    st.stop() # Stop if no chunks to process
+    st.warning("No review chunks available to process. Please check the CSV file and its content at '{CSV_FILE_PATH}'.")
+    st.stop()
 
 embeddings_global = get_embeddings(all_chunks_global, MODEL_NAME)
 
-if embeddings_global.size == 0 and all_chunks_global: # Chunks exist but embeddings failed
+if embeddings_global.size == 0 and all_chunks_global:
     st.error("Failed to generate embeddings for the review data. The app cannot proceed.")
     st.stop()
 elif embeddings_global.size > 0:
     st.success(f"Successfully loaded and processed {len(all_chunks_global)} review chunks. Ready for your questions!")
-else: # Handles cases where all_chunks_global is empty and embeddings_global is also empty
-    st.info("Waiting for review data to be processed.")
+else:
+    st.info("Waiting for review data to be processed or review data is empty.")
     st.stop()
 
 
@@ -176,13 +206,13 @@ if st.button("Get Answer", type="primary", use_container_width=True):
     if user_query:
         with st.spinner("Searching reviews and crafting your answer..."):
             retrieved_chunks = retrieve_relevant_chunks_streamlit(
-                user_query, 
-                all_chunks_global, 
-                embeddings_global, 
-                s_model_global, 
+                user_query,
+                all_chunks_global,
+                embeddings_global,
+                s_model_global,
                 k=10 # Number of chunks to retrieve for context
             )
-            
+
             if retrieved_chunks:
                 st.subheader("💡 AI-Generated Answer:")
                 answer = generate_answer_from_chunks_streamlit(user_query, retrieved_chunks, openai_client_global)
@@ -191,7 +221,7 @@ if st.button("Get Answer", type="primary", use_container_width=True):
                 with st.expander("View relevant review excerpts used for this answer"):
                     for i, chunk_text in enumerate(retrieved_chunks):
                         st.markdown(f"**Excerpt {i+1}:**")
-                        st.markdown(f"> _{chunk_text}_") # Using italics for excerpts
+                        st.markdown(f"> _{chunk_text}_")
             else:
                 st.info("Could not find any relevant review excerpts for your query in the provided data.")
     else:
